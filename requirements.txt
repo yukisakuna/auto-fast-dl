@@ -1,4 +1,2 @@
-tqdm
-aiofiles
-aiohttp
-psutil
+aiohttp==3.13.3
+tqdm==4.67.1
