@@ -35,6 +35,7 @@ func newManagerForTest(t *testing.T, opts Options) *DownloadManager {
 	if opts.Timeout == 0 {
 		opts.Timeout = 5 * time.Second
 	}
+	opts.NoProgress = true
 
 	manager, err := NewDownloadManager(opts)
 	if err != nil {
@@ -74,6 +75,103 @@ func TestNullSinkDownloadsAllRepeats(t *testing.T) {
 		t.Fatalf("FailedDownloads() = %d, want 0", got)
 	}
 	if got, want := stats.TotalBytes(), int64(len(testPayload)*24); got != want {
+		t.Fatalf("TotalBytes() = %d, want %d", got, want)
+	}
+}
+
+func TestNullSinkDoesNotCreateOutputDirectory(t *testing.T) {
+	server := payloadServer(t)
+	defer server.Close()
+
+	outputDir := filepath.Join(t.TempDir(), "downloads")
+	manager := newManagerForTest(t, Options{
+		Concurrency: 2,
+		Repeat:      3,
+		Sink:        "null",
+		OutputDir:   outputDir,
+	})
+
+	stats, err := manager.Run(context.Background(), server.URL+"/payload.bin")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got, want := stats.TotalFiles(), int64(3); got != want {
+		t.Fatalf("TotalFiles() = %d, want %d", got, want)
+	}
+	if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
+		t.Fatalf("output dir stat err = %v, want not exist", err)
+	}
+}
+
+func TestNullSinkCountsBytesBeforeDownloadCompletes(t *testing.T) {
+	const firstChunkSize = 8192
+
+	firstChunkSent := make(chan struct{})
+	releaseRest := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseRest:
+		default:
+			close(releaseRest)
+		}
+	}()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(testPayload)))
+		_, _ = w.Write(testPayload[:firstChunkSize])
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(firstChunkSent)
+		<-releaseRest
+		_, _ = w.Write(testPayload[firstChunkSize:])
+	}))
+	defer server.Close()
+
+	manager := newManagerForTest(t, Options{
+		Concurrency: 1,
+		Repeat:      1,
+		Sink:        "null",
+		ChunkSize:   1024,
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := manager.Run(context.Background(), server.URL+"/payload.bin")
+		errCh <- err
+	}()
+
+	select {
+	case <-firstChunkSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not send the first chunk")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for manager.stats.TotalBytes() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("TotalBytes() stayed at 0 before the download completed")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if got := manager.stats.TotalFiles(); got != 0 {
+		t.Fatalf("TotalFiles() = %d before completion, want 0", got)
+	}
+
+	close(releaseRest)
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not complete after releasing the rest of the response")
+	}
+	if got, want := manager.stats.TotalBytes(), int64(len(testPayload)); got != want {
 		t.Fatalf("TotalBytes() = %d, want %d", got, want)
 	}
 }
@@ -141,6 +239,22 @@ func TestUnboundedDiskModeIsRejected(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("NewDownloadManager() error = nil, want error")
+	}
+}
+
+func TestEmptySinkDefaultsToNull(t *testing.T) {
+	manager, err := NewDownloadManager(Options{
+		Concurrency: 1,
+		Repeat:      1,
+		OutputDir:   t.TempDir(),
+		ChunkSize:   1024,
+		Timeout:     5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewDownloadManager() error = %v", err)
+	}
+	if manager.opts.Sink != "null" {
+		t.Fatalf("Sink = %q, want null", manager.opts.Sink)
 	}
 }
 
@@ -271,6 +385,55 @@ func TestParseCLIAcceptsURLBeforeFlags(t *testing.T) {
 	}
 	if opts.Sink != "null" || opts.Repeat != 10 || opts.Concurrency != 4 {
 		t.Fatalf("opts = %+v", opts)
+	}
+}
+
+func TestParseCLIDefaultsToNullSink(t *testing.T) {
+	opts, rawURL, err := parseCLI([]string{"http://example.com/payload.bin"})
+	if err != nil {
+		t.Fatalf("parseCLI() error = %v", err)
+	}
+	if rawURL != "http://example.com/payload.bin" {
+		t.Fatalf("rawURL = %q", rawURL)
+	}
+	if opts.Sink != "null" {
+		t.Fatalf("Sink = %q, want null", opts.Sink)
+	}
+}
+
+func TestParseCLIEndlessForcesNullInfinite512(t *testing.T) {
+	opts, rawURL, err := parseCLI([]string{
+		"http://example.com/payload.bin",
+		"--endless",
+		"--sink",
+		"disk",
+		"--repeat",
+		"10",
+		"--concurrency",
+		"4",
+	})
+	if err != nil {
+		t.Fatalf("parseCLI() error = %v", err)
+	}
+	if rawURL != "http://example.com/payload.bin" {
+		t.Fatalf("rawURL = %q", rawURL)
+	}
+	if opts.Sink != "null" || opts.Repeat != 0 || opts.Concurrency != maxConcurrency {
+		t.Fatalf("opts = %+v, want sink=null repeat=0 concurrency=%d", opts, maxConcurrency)
+	}
+}
+
+func TestProgressLineIncludesRequestedMetrics(t *testing.T) {
+	stats := &DownloadStats{}
+	stats.reset()
+	stats.totalBytes.Store(2_500_000_000)
+	stats.totalFiles.Store(17)
+
+	line := formatProgressLine(stats, 800, Options{Sink: "null"}, "|")
+	for _, want := range []string{"Mbps", "total=", "GB", "1h@now=", "files=17", "sink=null"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("progress line %q does not contain %q", line, want)
+		}
 	}
 }
 

@@ -86,6 +86,26 @@ func (s *DownloadStats) MiBPerSecond() float64 {
 	return float64(s.TotalBytes()) / (1024 * 1024) / elapsed
 }
 
+func (s *DownloadStats) Mbps() float64 {
+	elapsed := s.Elapsed().Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	return bytesToMbps(float64(s.TotalBytes()), elapsed)
+}
+
+func (s *DownloadStats) GB() float64 {
+	return float64(s.TotalBytes()) / 1_000_000_000
+}
+
+func (s *DownloadStats) GBPerHour() float64 {
+	elapsed := s.Elapsed().Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	return (float64(s.TotalBytes()) / elapsed) * 3600 / 1_000_000_000
+}
+
 func (s *DownloadStats) FilesPerSecond() float64 {
 	elapsed := s.Elapsed().Seconds()
 	if elapsed <= 0 {
@@ -101,7 +121,23 @@ type DownloadManager struct {
 	nextJob atomic.Int64
 }
 
+type countingWriter struct {
+	w     io.Writer
+	stats *DownloadStats
+}
+
+func (cw countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	if n > 0 {
+		cw.stats.totalBytes.Add(int64(n))
+	}
+	return n, err
+}
+
 func NewDownloadManager(opts Options) (*DownloadManager, error) {
+	if strings.TrimSpace(opts.Sink) == "" {
+		opts.Sink = "null"
+	}
 	if opts.Concurrency < 1 {
 		return nil, fmt.Errorf("concurrency must be >= 1")
 	}
@@ -155,6 +191,8 @@ func (m *DownloadManager) Run(parent context.Context, rawURL string) (*DownloadS
 
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	stopProgress := m.startProgress()
+	defer stopProgress()
 
 	client := &http.Client{
 		Timeout: m.opts.Timeout,
@@ -232,12 +270,12 @@ func (m *DownloadManager) downloadOne(ctx context.Context, client *http.Client, 
 		return m.saveToDisk(resp.Body, jobID, rawURL, buf)
 	}
 
-	n, err := io.CopyBuffer(io.Discard, resp.Body, buf)
+	n, err := io.CopyBuffer(countingWriter{w: io.Discard, stats: &m.stats}, resp.Body, buf)
 	if err != nil {
 		return err
 	}
 	m.stats.totalFiles.Add(1)
-	m.stats.totalBytes.Add(n)
+	_ = n
 	return nil
 }
 
@@ -254,7 +292,7 @@ func (m *DownloadManager) saveToDisk(body io.Reader, jobID int64, rawURL *url.UR
 		_ = os.Remove(tempPath)
 	}()
 
-	n, err := io.CopyBuffer(file, body, buf)
+	n, err := io.CopyBuffer(countingWriter{w: file, stats: &m.stats}, body, buf)
 	if err != nil {
 		return err
 	}
@@ -266,7 +304,7 @@ func (m *DownloadManager) saveToDisk(body io.Reader, jobID int64, rawURL *url.UR
 	}
 
 	m.stats.totalFiles.Add(1)
-	m.stats.totalBytes.Add(n)
+	_ = n
 	return nil
 }
 
@@ -275,6 +313,101 @@ func (m *DownloadManager) recordFailure(err error) {
 	m.stats.mu.Lock()
 	m.stats.lastError = err.Error()
 	m.stats.mu.Unlock()
+}
+
+func (m *DownloadManager) startProgress() func() {
+	if m.opts.NoProgress || !isTerminal(os.Stderr) {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	var once sync.Once
+
+	go func() {
+		defer close(finished)
+		m.renderProgress(done)
+	}()
+
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-finished
+		})
+	}
+}
+
+func (m *DownloadManager) renderProgress(done <-chan struct{}) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	frames := []string{"|", "/", "-", "\\"}
+	frameIndex := 0
+	lastBytes := m.stats.TotalBytes()
+	lastTime := time.Now()
+
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			totalBytes := m.stats.TotalBytes()
+			currentMbps := sampleMbps(totalBytes-lastBytes, now.Sub(lastTime))
+			fmt.Fprintf(os.Stderr, "\r\033[2K%s", formatProgressLine(&m.stats, currentMbps, m.opts, frames[frameIndex%len(frames)]))
+			lastBytes = totalBytes
+			lastTime = now
+			frameIndex++
+		case <-done:
+			now := time.Now()
+			totalBytes := m.stats.TotalBytes()
+			currentMbps := sampleMbps(totalBytes-lastBytes, now.Sub(lastTime))
+			fmt.Fprintf(os.Stderr, "\r\033[2K%s\n", formatProgressLine(&m.stats, currentMbps, m.opts, "done"))
+			return
+		}
+	}
+}
+
+func formatProgressLine(stats *DownloadStats, currentMbps float64, opts Options, marker string) string {
+	return fmt.Sprintf(
+		"[%s] now=%7.2f Mbps avg=%7.2f Mbps total=%8.3f GB 1h@now=%8.2f GB files=%d failed=%d elapsed=%s sink=%s",
+		marker,
+		currentMbps,
+		stats.Mbps(),
+		stats.GB(),
+		gbPerHourFromMbps(currentMbps),
+		stats.TotalFiles(),
+		stats.FailedDownloads(),
+		stats.Elapsed().Round(time.Second),
+		opts.Sink,
+	)
+}
+
+func sampleMbps(byteDelta int64, elapsed time.Duration) float64 {
+	if byteDelta <= 0 || elapsed <= 0 {
+		return 0
+	}
+	return bytesToMbps(float64(byteDelta), elapsed.Seconds())
+}
+
+func bytesToMbps(bytes float64, elapsedSeconds float64) float64 {
+	if bytes <= 0 || elapsedSeconds <= 0 {
+		return 0
+	}
+	return (bytes * 8) / elapsedSeconds / 1_000_000
+}
+
+func gbPerHourFromMbps(mbps float64) float64 {
+	if mbps <= 0 {
+		return 0
+	}
+	return (mbps * 1_000_000 / 8) * 3600 / 1_000_000_000
+}
+
+func isTerminal(file *os.File) bool {
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func (m *DownloadManager) cleanupFiles() error {

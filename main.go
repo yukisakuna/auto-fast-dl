@@ -62,12 +62,13 @@ func parseCLI(args []string) (Options, string, error) {
 	opts := Options{
 		Concurrency: defaultConcurrency(),
 		Repeat:      1,
-		Sink:        "disk",
+		Sink:        "null",
 		OutputDir:   "downloads",
 		ChunkSize:   1024 * 1024,
 		Timeout:     30 * time.Second,
 	}
 	timeoutSeconds := 30
+	endless := false
 	showHelp := false
 	showVersion := false
 
@@ -78,7 +79,8 @@ func parseCLI(args []string) (Options, string, error) {
 	fs.IntVar(&opts.Concurrency, "c", opts.Concurrency, "parallel downloads")
 	fs.IntVar(&opts.Repeat, "repeat", opts.Repeat, "number of downloads; 0 means run until interrupted")
 	fs.IntVar(&opts.Repeat, "n", opts.Repeat, "number of downloads; 0 means run until interrupted")
-	fs.StringVar(&opts.Sink, "sink", opts.Sink, "disk saves files; null discards bytes after receiving them")
+	fs.BoolVar(&endless, "endless", false, "run forever with --sink null, --repeat 0, and --concurrency 512")
+	fs.StringVar(&opts.Sink, "sink", opts.Sink, "null discards bytes after receiving them; disk saves files")
 	fs.StringVar(&opts.OutputDir, "output-dir", opts.OutputDir, "directory for disk downloads")
 	fs.StringVar(&opts.OutputDir, "o", opts.OutputDir, "directory for disk downloads")
 	fs.IntVar(&opts.ChunkSize, "chunk-size", opts.ChunkSize, "streaming chunk size in bytes")
@@ -113,7 +115,12 @@ func parseCLI(args []string) (Options, string, error) {
 	}
 
 	if strings.TrimSpace(opts.Sink) == "" {
-		opts.Sink = "disk"
+		opts.Sink = "null"
+	}
+	if endless {
+		opts.Concurrency = maxConcurrency
+		opts.Repeat = 0
+		opts.Sink = "null"
 	}
 
 	return opts, rawURL, nil
@@ -122,6 +129,7 @@ func parseCLI(args []string) (Options, string, error) {
 func splitArgs(args []string) ([]string, string) {
 	boolFlags := map[string]struct{}{
 		"cleanup":     {},
+		"endless":     {},
 		"no-progress": {},
 		"version":     {},
 		"h":           {},
@@ -191,13 +199,16 @@ func printSummary(stats *DownloadStats, interrupted bool) {
 	}
 
 	fmt.Printf(
-		"%s: files=%d failed=%d bytes=%d elapsed=%.2fs speed=%.2f MiB/s files/s=%.2f\n",
+		"%s: files=%d failed=%d bytes=%d total=%.3f GB elapsed=%.2fs speed=%.2f Mbps (%.2f MiB/s) est_1h=%.2f GB files/s=%.2f\n",
 		status,
 		stats.TotalFiles(),
 		stats.FailedDownloads(),
 		stats.TotalBytes(),
+		stats.GB(),
 		stats.Elapsed().Seconds(),
+		stats.Mbps(),
 		stats.MiBPerSecond(),
+		stats.GBPerHour(),
 		stats.FilesPerSecond(),
 	)
 	if lastError := stats.LastError(); lastError != "" {

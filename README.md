@@ -2,48 +2,49 @@
 
 High-throughput downloader for authorized download and bandwidth tests.
 
-The fast path is the Go implementation (`go run .` / built binary). The Python version remains in `main.py` for compatibility and comparison.
+The supported implementation is Go (`go run .` / built binary).
 
 ## Setup
-
-Go version:
 
 ```powershell
 go test ./...
 go build -o auto-fast-dl.exe .
 ```
 
-Python version:
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
 ## Usage
 
-Download one copy to disk:
+Download one copy and discard it after receiving the bytes:
 
 ```powershell
 go run . https://example.com/file.bin
 ```
 
+Save files to disk only when you explicitly need them:
+
+```powershell
+go run . https://example.com/file.bin --sink disk --repeat 1
+```
+
 Fast discard mode for an authorized endpoint:
 
 ```powershell
-go run . https://example.com/file.bin --sink null --repeat 1000 --concurrency 128
+go run . https://example.com/file.bin --repeat 1000 --concurrency 128
 ```
 
 Run continuously until Ctrl+C:
 
 ```powershell
-go run . https://example.com/file.bin --sink null --repeat 0 --concurrency 128
+go run . https://example.com/file.bin --endless
 ```
 
-Infinite runs are only supported with `--sink null`; use a finite `--repeat` for disk writes.
+`--endless` forces `--sink null`, `--repeat 0`, and `--concurrency 512`.
+Infinite runs are only supported with `--sink null`; use a finite `--repeat` and explicit `--sink disk` for disk writes.
+Progress output shows current Mbps, average Mbps, total GB received, and the current 1-hour GB projection. Use `--no-progress` to hide the live status line.
 
 Useful options:
 
-- `--sink disk|null`: save files or discard bytes after receiving them.
+- `--sink null|disk`: discard bytes after receiving them or save files. Default: `null`.
+- `--endless`: run continuously with `--sink null`, `--repeat 0`, and `--concurrency 512`.
 - `--repeat N` / `-n N`: number of downloads. `0` means infinite.
 - `--concurrency N` / `-c N`: number of parallel requests, max `512`.
 - `--chunk-size N`: streaming chunk size in bytes.
