@@ -64,7 +64,7 @@ func parseCLI(args []string) (Options, string, error) {
 		Repeat:      1,
 		Sink:        "null",
 		OutputDir:   "downloads",
-		ChunkSize:   1024 * 1024,
+		ChunkSize:   defaultChunkSize,
 		Timeout:     30 * time.Second,
 	}
 	timeoutSeconds := 30

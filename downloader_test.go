@@ -258,6 +258,32 @@ func TestEmptySinkDefaultsToNull(t *testing.T) {
 	}
 }
 
+func TestZeroChunkSizeUsesDefault(t *testing.T) {
+	manager, err := NewDownloadManager(Options{
+		Concurrency: 1,
+		Repeat:      1,
+		Sink:        "null",
+		Timeout:     5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewDownloadManager() error = %v", err)
+	}
+	if manager.opts.ChunkSize != defaultChunkSize {
+		t.Fatalf("ChunkSize = %d, want %d", manager.opts.ChunkSize, defaultChunkSize)
+	}
+}
+
+func TestWorkerCountDoesNotExceedFiniteRepeat(t *testing.T) {
+	manager := newManagerForTest(t, Options{
+		Concurrency: maxConcurrency,
+		Repeat:      3,
+		Sink:        "null",
+	})
+	if got, want := manager.workerCount(), 3; got != want {
+		t.Fatalf("workerCount() = %d, want %d", got, want)
+	}
+}
+
 func TestDiskSinkWritesAndCleansOnlyCurrentRunFiles(t *testing.T) {
 	server := payloadServer(t)
 	defer server.Close()

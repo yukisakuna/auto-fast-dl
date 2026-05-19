@@ -19,6 +19,9 @@ import (
 const Version = "0.1.0"
 
 const maxConcurrency = 512
+const defaultChunkSize = 64 * 1024
+const minStatFlushBytes = 8 * 1024
+const maxStatFlushBytes = 1024 * 1024
 
 type Options struct {
 	Concurrency int
@@ -115,28 +118,51 @@ func (s *DownloadStats) FilesPerSecond() float64 {
 }
 
 type DownloadManager struct {
-	opts    Options
-	stats   DownloadStats
-	runID   string
-	nextJob atomic.Int64
+	opts         Options
+	stats        DownloadStats
+	runID        string
+	nextJob      atomic.Int64
+	createdMu    sync.Mutex
+	createdFiles []string
 }
 
 type countingWriter struct {
-	w     io.Writer
-	stats *DownloadStats
+	w          io.Writer
+	stats      *DownloadStats
+	pending    int64
+	flushBytes int64
 }
 
-func (cw countingWriter) Write(p []byte) (int, error) {
-	n, err := cw.w.Write(p)
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	var err error
+	if cw.w != nil {
+		n, err = cw.w.Write(p)
+	}
 	if n > 0 {
-		cw.stats.totalBytes.Add(int64(n))
+		cw.pending += int64(n)
+		if cw.pending >= cw.flushBytes {
+			cw.Flush()
+		}
 	}
 	return n, err
+}
+
+func (cw *countingWriter) Flush() {
+	if cw.pending > 0 {
+		if cw.stats != nil {
+			cw.stats.totalBytes.Add(cw.pending)
+		}
+		cw.pending = 0
+	}
 }
 
 func NewDownloadManager(opts Options) (*DownloadManager, error) {
 	if strings.TrimSpace(opts.Sink) == "" {
 		opts.Sink = "null"
+	}
+	if opts.ChunkSize == 0 {
+		opts.ChunkSize = defaultChunkSize
 	}
 	if opts.Concurrency < 1 {
 		return nil, fmt.Errorf("concurrency must be >= 1")
@@ -172,11 +198,16 @@ func (m *DownloadManager) Run(parent context.Context, rawURL string) (*DownloadS
 	m.stats.reset()
 	m.runID = newRunID()
 	m.nextJob.Store(0)
+	m.createdMu.Lock()
+	m.createdFiles = nil
+	m.createdMu.Unlock()
 
 	parsedURL, err := validateURL(rawURL)
 	if err != nil {
 		return &m.stats, err
 	}
+	urlString := parsedURL.String()
+	workerCount := m.workerCount()
 
 	if m.opts.Sink == "disk" {
 		if err := prepareOutputDir(m.opts.OutputDir); err != nil {
@@ -194,25 +225,28 @@ func (m *DownloadManager) Run(parent context.Context, rawURL string) (*DownloadS
 	stopProgress := m.startProgress()
 	defer stopProgress()
 
+	transport := &http.Transport{
+		MaxConnsPerHost:     workerCount,
+		MaxIdleConns:        workerCount,
+		MaxIdleConnsPerHost: workerCount,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true,
+		ForceAttemptHTTP2:   true,
+	}
+	defer transport.CloseIdleConnections()
+
 	client := &http.Client{
-		Timeout: m.opts.Timeout,
-		Transport: &http.Transport{
-			MaxConnsPerHost:     m.opts.Concurrency,
-			MaxIdleConns:        m.opts.Concurrency * 2,
-			MaxIdleConnsPerHost: m.opts.Concurrency,
-			IdleConnTimeout:     90 * time.Second,
-			DisableCompression:  true,
-			ForceAttemptHTTP2:   true,
-		},
+		Timeout:   m.opts.Timeout,
+		Transport: transport,
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < m.opts.Concurrency; i++ {
+	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 
-			buf := make([]byte, m.opts.ChunkSize)
+			var buf []byte
 			for {
 				if ctx.Err() != nil {
 					return
@@ -222,8 +256,11 @@ func (m *DownloadManager) Run(parent context.Context, rawURL string) (*DownloadS
 				if m.opts.Repeat > 0 && jobID > int64(m.opts.Repeat) {
 					return
 				}
+				if buf == nil {
+					buf = make([]byte, m.opts.ChunkSize)
+				}
 
-				if err := m.downloadOne(ctx, client, parsedURL, jobID, buf); err != nil {
+				if err := m.downloadOne(ctx, client, parsedURL, urlString, jobID, buf); err != nil {
 					if errors.Is(err, context.Canceled) {
 						return
 					}
@@ -247,8 +284,15 @@ func (m *DownloadManager) Run(parent context.Context, rawURL string) (*DownloadS
 	return &m.stats, nil
 }
 
-func (m *DownloadManager) downloadOne(ctx context.Context, client *http.Client, rawURL *url.URL, jobID int64, buf []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL.String(), nil)
+func (m *DownloadManager) workerCount() int {
+	if m.opts.Repeat > 0 && m.opts.Repeat < m.opts.Concurrency {
+		return m.opts.Repeat
+	}
+	return m.opts.Concurrency
+}
+
+func (m *DownloadManager) downloadOne(ctx context.Context, client *http.Client, rawURL *url.URL, urlString string, jobID int64, buf []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlString, nil)
 	if err != nil {
 		return err
 	}
@@ -262,20 +306,22 @@ func (m *DownloadManager) downloadOne(ctx context.Context, client *http.Client, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return fmt.Errorf("GET %s returned HTTP %d", rawURL.String(), resp.StatusCode)
+		counter := newCountingWriter(nil, nil, len(buf))
+		_, _ = io.CopyBuffer(&counter, resp.Body, buf)
+		return fmt.Errorf("GET %s returned HTTP %d", urlString, resp.StatusCode)
 	}
 
 	if m.opts.Sink == "disk" {
 		return m.saveToDisk(resp.Body, jobID, rawURL, buf)
 	}
 
-	n, err := io.CopyBuffer(countingWriter{w: io.Discard, stats: &m.stats}, resp.Body, buf)
+	counter := newCountingWriter(nil, &m.stats, len(buf))
+	_, err = io.CopyBuffer(&counter, resp.Body, buf)
+	counter.Flush()
 	if err != nil {
 		return err
 	}
 	m.stats.totalFiles.Add(1)
-	_ = n
 	return nil
 }
 
@@ -287,25 +333,48 @@ func (m *DownloadManager) saveToDisk(body io.Reader, jobID int64, rawURL *url.UR
 	if err != nil {
 		return err
 	}
-	defer func() {
+
+	counter := newCountingWriter(file, &m.stats, len(buf))
+	_, err = io.CopyBuffer(&counter, body, buf)
+	counter.Flush()
+	if err != nil {
 		_ = file.Close()
 		_ = os.Remove(tempPath)
-	}()
-
-	n, err := io.CopyBuffer(countingWriter{w: file, stats: &m.stats}, body, buf)
-	if err != nil {
 		return err
 	}
 	if err := file.Close(); err != nil {
+		_ = os.Remove(tempPath)
 		return err
 	}
 	if err := os.Rename(tempPath, outputPath); err != nil {
+		_ = os.Remove(tempPath)
 		return err
 	}
 
+	m.recordCreatedFile(outputPath)
 	m.stats.totalFiles.Add(1)
-	_ = n
 	return nil
+}
+
+func newCountingWriter(w io.Writer, stats *DownloadStats, bufSize int) countingWriter {
+	flushBytes := int64(bufSize) * 4
+	if flushBytes < minStatFlushBytes {
+		flushBytes = minStatFlushBytes
+	}
+	if flushBytes > maxStatFlushBytes {
+		flushBytes = maxStatFlushBytes
+	}
+	return countingWriter{
+		w:          w,
+		stats:      stats,
+		flushBytes: flushBytes,
+	}
+}
+
+func (m *DownloadManager) recordCreatedFile(path string) {
+	m.createdMu.Lock()
+	m.createdFiles = append(m.createdFiles, path)
+	m.createdMu.Unlock()
 }
 
 func (m *DownloadManager) recordFailure(err error) {
@@ -338,7 +407,7 @@ func (m *DownloadManager) startProgress() func() {
 }
 
 func (m *DownloadManager) renderProgress(done <-chan struct{}) {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	frames := []string{"|", "/", "-", "\\"}
@@ -411,6 +480,17 @@ func isTerminal(file *os.File) bool {
 }
 
 func (m *DownloadManager) cleanupFiles() error {
+	m.createdMu.Lock()
+	createdFiles := append([]string(nil), m.createdFiles...)
+	m.createdMu.Unlock()
+
+	if len(createdFiles) > 0 {
+		for _, file := range createdFiles {
+			_ = os.Remove(file)
+		}
+		return nil
+	}
+
 	entries, err := os.ReadDir(m.opts.OutputDir)
 	if err != nil {
 		return err
