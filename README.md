@@ -62,11 +62,11 @@ The Android app includes the same core controls as the Go version:
 - `repeat`, including `0` for endless mode with `sink=null`.
 - `Endless mode`, which requests Go-style `sink=null`, `repeat=0`, and `concurrency=512`.
 - `concurrency` up to `512`.
-- `output directory`, `chunk size`, `timeout`, `cleanup`, and `max failures`.
+- `output directory`, `chunk size` (default: `65536`), `timeout`, `cleanup`, and `max failures`.
 - Live stats for current Mbps, average Mbps, total GB, 1-hour projection, files, failures, and files/s.
 - Start runs in a foreground service, so the download keeps running after the app screen is closed. Use the app Stop button or the notification Stop action to cancel it.
 
-Android caps active worker threads to a per-device safe limit while preserving the requested concurrency value in the UI. This prevents OS-level thread creation crashes on phones when endless mode requests `512`.
+Android caps active worker threads to a per-device safe limit and never starts more workers than a finite repeat count requires, while preserving the requested concurrency value in the UI. This prevents OS-level thread creation crashes on phones when endless mode requests `512`.
 
 Build and test the debug APK:
 

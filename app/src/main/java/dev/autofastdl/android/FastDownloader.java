@@ -230,6 +230,7 @@ public final class FastDownloader {
                 }
             }
             stats.addBytes(pendingBytes);
+            pendingBytes = 0;
         } catch (IOException | RuntimeException error) {
             stats.addBytes(pendingBytes);
             throw error;
@@ -252,6 +253,7 @@ public final class FastDownloader {
                 }
             }
             stats.addBytes(pendingBytes);
+            pendingBytes = 0;
         } catch (IOException | RuntimeException error) {
             stats.addBytes(pendingBytes);
             throw error;

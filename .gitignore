@@ -3,3 +3,8 @@ build/
 app/build/
 local.properties
 *.iml
+dist/
+downloads/
+auto-fast-dl
+auto-fast-dl.exe
+*.apk
