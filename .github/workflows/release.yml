@@ -38,24 +38,9 @@ jobs:
           set -o pipefail
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Test Go
-        run: go test ./...
-
-      - name: Test and build Android
-        run: ./gradlew testDebugUnitTest assembleDebug
-
-      - name: Build release files
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/auto-fast-dl-linux-amd64 .
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/auto-fast-dl-linux-arm64 .
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/auto-fast-dl-windows-amd64.exe .
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/auto-fast-dl-darwin-amd64 .
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/auto-fast-dl-darwin-arm64 .
-          cp app/build/outputs/apk/debug/app-debug.apk dist/auto-fast-dl-android-debug.apk
-          (cd dist && sha256sum * > SHA256SUMS)
+      - name: Test and build release files
+        shell: pwsh
+        run: ./build-all.ps1
 
       - name: Create GitHub release
         env:

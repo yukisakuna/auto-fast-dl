@@ -273,6 +273,31 @@ func TestZeroChunkSizeUsesDefault(t *testing.T) {
 	}
 }
 
+func TestBuildProfileControlsDefaults(t *testing.T) {
+	if performanceBuild() {
+		if got, want := maxConcurrency, 2048; got != want {
+			t.Fatalf("maxConcurrency = %d, want %d", got, want)
+		}
+		if got, want := defaultChunkSize, 1024*1024; got != want {
+			t.Fatalf("defaultChunkSize = %d, want %d", got, want)
+		}
+		if got, want := versionString(), Version+"-performance"; got != want {
+			t.Fatalf("versionString() = %q, want %q", got, want)
+		}
+		return
+	}
+
+	if got, want := maxConcurrency, 512; got != want {
+		t.Fatalf("maxConcurrency = %d, want %d", got, want)
+	}
+	if got, want := defaultChunkSize, 64*1024; got != want {
+		t.Fatalf("defaultChunkSize = %d, want %d", got, want)
+	}
+	if got, want := versionString(), Version; got != want {
+		t.Fatalf("versionString() = %q, want %q", got, want)
+	}
+}
+
 func TestWorkerCountDoesNotExceedFiniteRepeat(t *testing.T) {
 	manager := newManagerForTest(t, Options{
 		Concurrency: maxConcurrency,

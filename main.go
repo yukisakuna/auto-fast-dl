@@ -79,7 +79,7 @@ func parseCLI(args []string) (Options, string, error) {
 	fs.IntVar(&opts.Concurrency, "c", opts.Concurrency, "parallel downloads")
 	fs.IntVar(&opts.Repeat, "repeat", opts.Repeat, "number of downloads; 0 means run until interrupted")
 	fs.IntVar(&opts.Repeat, "n", opts.Repeat, "number of downloads; 0 means run until interrupted")
-	fs.BoolVar(&endless, "endless", false, "run forever with --sink null, --repeat 0, and --concurrency 512")
+	fs.BoolVar(&endless, "endless", false, fmt.Sprintf("run forever with --sink null, --repeat 0, and --concurrency %d", maxConcurrency))
 	fs.StringVar(&opts.Sink, "sink", opts.Sink, "null discards bytes after receiving them; disk saves files")
 	fs.StringVar(&opts.OutputDir, "output-dir", opts.OutputDir, "directory for disk downloads")
 	fs.StringVar(&opts.OutputDir, "o", opts.OutputDir, "directory for disk downloads")
@@ -110,7 +110,7 @@ func parseCLI(args []string) (Options, string, error) {
 		return opts, rawURL, flag.ErrHelp
 	}
 	if showVersion {
-		fmt.Println(Version)
+		fmt.Println(versionString())
 		return opts, rawURL, flag.ErrHelp
 	}
 
@@ -228,9 +228,15 @@ func promptURL() (string, error) {
 
 func defaultConcurrency() int {
 	cpus := runtime.NumCPU()
-	value := cpus * 8
-	if value < 32 {
-		value = 32
+	multiplier := 8
+	floor := 32
+	if performanceBuild() {
+		multiplier = 16
+		floor = 64
+	}
+	value := cpus * multiplier
+	if value < floor {
+		value = floor
 	}
 	if value > maxConcurrency {
 		value = maxConcurrency

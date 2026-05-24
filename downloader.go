@@ -18,10 +18,38 @@ import (
 
 const Version = "0.1.0"
 
-const maxConcurrency = 512
-const defaultChunkSize = 64 * 1024
 const minStatFlushBytes = 8 * 1024
 const maxStatFlushBytes = 1024 * 1024
+
+var BuildProfile = "standard"
+
+var maxConcurrency = configuredMaxConcurrency()
+var defaultChunkSize = configuredDefaultChunkSize()
+
+func configuredMaxConcurrency() int {
+	if performanceBuild() {
+		return 2048
+	}
+	return 512
+}
+
+func configuredDefaultChunkSize() int {
+	if performanceBuild() {
+		return 1024 * 1024
+	}
+	return 64 * 1024
+}
+
+func performanceBuild() bool {
+	return strings.EqualFold(BuildProfile, "performance")
+}
+
+func versionString() string {
+	if performanceBuild() {
+		return Version + "-performance"
+	}
+	return Version
+}
 
 type Options struct {
 	Concurrency int
@@ -297,7 +325,7 @@ func (m *DownloadManager) downloadOne(ctx context.Context, client *http.Client, 
 		return err
 	}
 	req.Header.Set("Accept-Encoding", "identity")
-	req.Header.Set("User-Agent", "auto-fast-dl-go/"+Version)
+	req.Header.Set("User-Agent", "auto-fast-dl-go/"+versionString())
 
 	resp, err := client.Do(req)
 	if err != nil {

@@ -4,9 +4,9 @@ import java.io.File;
 import java.util.Locale;
 
 public final class DownloadOptions {
-    public static final int MAX_CONCURRENCY = 512;
-    public static final int MAX_ACTIVE_WORKERS = 64;
-    public static final int DEFAULT_CHUNK_SIZE = 64 * 1024;
+    public static final int MAX_CONCURRENCY = BuildConfig.MAX_CONCURRENCY;
+    public static final int MAX_ACTIVE_WORKERS = BuildConfig.MAX_ACTIVE_WORKERS;
+    public static final int DEFAULT_CHUNK_SIZE = BuildConfig.DEFAULT_CHUNK_SIZE;
 
     public final int concurrency;
     public final int repeat;
@@ -66,9 +66,11 @@ public final class DownloadOptions {
 
     public static int defaultConcurrency() {
         int cpus = Runtime.getRuntime().availableProcessors();
-        int value = cpus * 4;
-        if (value < 8) {
-            value = 8;
+        int multiplier = BuildConfig.PERFORMANCE_BUILD ? 16 : 4;
+        int floor = BuildConfig.PERFORMANCE_BUILD ? 64 : 8;
+        int value = cpus * multiplier;
+        if (value < floor) {
+            value = floor;
         }
         return Math.min(value, MAX_ACTIVE_WORKERS);
     }

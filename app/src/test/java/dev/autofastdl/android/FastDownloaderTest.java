@@ -162,8 +162,18 @@ public final class FastDownloaderTest {
     }
 
     @Test
-    public void defaultChunkSizeMatchesGoDefault() {
-        assertEquals(64 * 1024, DownloadOptions.DEFAULT_CHUNK_SIZE);
+    public void buildProfileControlsDefaults() {
+        if (BuildConfig.PERFORMANCE_BUILD) {
+            assertEquals(2048, DownloadOptions.MAX_CONCURRENCY);
+            assertEquals(256, DownloadOptions.MAX_ACTIVE_WORKERS);
+            assertEquals(1024 * 1024, DownloadOptions.DEFAULT_CHUNK_SIZE);
+            assertEquals("0.1.0-performance", FastDownloader.VERSION);
+        } else {
+            assertEquals(512, DownloadOptions.MAX_CONCURRENCY);
+            assertEquals(64, DownloadOptions.MAX_ACTIVE_WORKERS);
+            assertEquals(64 * 1024, DownloadOptions.DEFAULT_CHUNK_SIZE);
+            assertEquals("0.1.0", FastDownloader.VERSION);
+        }
     }
 
     private DownloadOptions options(int concurrency, int repeat, SinkMode sinkMode, File outputDir) {

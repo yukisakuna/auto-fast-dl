@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class FastDownloader {
-    public static final String VERSION = "0.1.0";
+    public static final String VERSION = BuildConfig.PERFORMANCE_BUILD ? "0.1.0-performance" : "0.1.0";
 
     private final DownloadOptions options;
     private final DownloadStats stats = new DownloadStats();
